@@ -177,7 +177,7 @@ class ContextNetwork(nn.Module):
             ConvBlock(128, 96, kernel_size=3, dilation=8, padding=8),
             ConvBlock(96, 64, kernel_size=3, dilation=16, padding=16),
             ConvBlock(64, 32, kernel_size=3, dilation=1, padding=1),
-            nn.Conv2d(32, 2, kernel_size=3, padding=1),
+            nn.Conv2d(32, 4, kernel_size=3, padding=1),
         )
 
     def forward(self, x: Tensor) -> Tensor:  # noqa: D401 - refer to base class.
