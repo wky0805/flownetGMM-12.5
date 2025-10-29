@@ -14,7 +14,7 @@ tensor operations close to the published design.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -28,6 +28,8 @@ from .blocks import (
     build_cost_volume,
     warp,
 )
+from .gmm import GMMConfig, ResidualGMM
+from .modulation import DualGateConfig, DualGateModulator
 
 
 def upsample_flow(flow: Tensor, scale_factor: float = 2.0) -> Tensor:
@@ -51,6 +53,8 @@ class LiteFlowNet3Config:
         )
     )
     context_channels: int | None = None
+    gmm: GMMConfig | None = field(default_factory=GMMConfig)
+    dual_gate: DualGateConfig | None = field(default_factory=DualGateConfig)
 
 
 class LiteFlowNet3(nn.Module):
@@ -83,6 +87,15 @@ class LiteFlowNet3(nn.Module):
 
         self.context_net = ContextNetwork(context_in_channels)
 
+        self.dual_gate: DualGateModulator | None = None
+        if config.dual_gate is not None:
+            self.dual_gate = DualGateModulator(config.dual_gate)
+
+        self.residual_gmm: ResidualGMM | None = None
+        if config.gmm is not None:
+            self.residual_gmm = ResidualGMM(config.gmm)
+        self._latest_gating: Dict[str, Tensor] | None = None
+
     def forward(self, frame1: Tensor, frame2: Tensor) -> Tensor:
         """Estimate optical flow from ``frame1`` to ``frame2``.
 
@@ -94,6 +107,8 @@ class LiteFlowNet3(nn.Module):
 
         if frame1.shape != frame2.shape:
             raise ValueError("Input frames must have the same shape")
+
+        self._latest_gating = None
 
         features1 = self.feature_extractor(frame1)
         features2 = self.feature_extractor(frame2)
@@ -127,9 +142,48 @@ class LiteFlowNet3(nn.Module):
         if last_context_input is None:
             raise RuntimeError("Decoder did not run; check configuration")
 
-        refined_flow = flow + self.context_net(last_context_input)
+        context_output = self.context_net(last_context_input)
+        flow_delta = context_output[:, :2]
+        confidence_logits = context_output[:, 2:3]
+        outlier_logits = context_output[:, 3:4]
+
+        confidence_map = torch.sigmoid(confidence_logits)
+        outlier_prob = torch.sigmoid(outlier_logits)
+        refined_delta = flow_delta
+
+        if self.dual_gate is not None:
+            refined_delta, confidence_map, outlier_prob = self.dual_gate(
+                flow_delta, confidence_logits, outlier_logits
+            )
+        else:
+            confidence_floor = 1e-4
+            confidence_map = torch.clamp(confidence_map, min=confidence_floor, max=1.0)
+
+        refined_flow = flow + refined_delta
+        self._latest_gating = {
+            "confidence": confidence_map,
+            "outlier": outlier_prob,
+        }
 
         return upsample_flow(refined_flow, scale_factor=2.0)
+
+    def residual_nll(
+        self, predicted_flow: Tensor, target_flow: Tensor, update_em: bool = True
+    ) -> Tuple[Tensor, Dict[str, Tensor]]:
+        """Compute the residual negative log-likelihood loss if GMM modelling is enabled."""
+
+        if self.residual_gmm is None:
+            raise RuntimeError("Residual GMM module is not configured for this model")
+
+        residual = predicted_flow - target_flow
+        return self.residual_gmm(residual, update_em=update_em)
+
+    def latest_gating(self) -> Dict[str, Tensor]:
+        """Return the gating maps from the most recent forward pass."""
+
+        if self._latest_gating is None:
+            raise RuntimeError("Dual-gated modulation has not been executed yet")
+        return self._latest_gating
 
 
 __all__ = ["LiteFlowNet3", "LiteFlowNet3Config"]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import torch
 from torch import Tensor, nn
@@ -42,10 +42,24 @@ def ensure_cuda_compat(min_version: str = "12.4") -> None:
         )
 
 
-def save_checkpoint(path: str | Path, model: nn.Module, optimizer: torch.optim.Optimizer, epoch: int) -> None:
+def save_checkpoint(
+    path: str | Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": epoch}, path)
+    payload: dict[str, Any] = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "epoch": epoch,
+    }
+    if extra:
+        payload.update(extra)
+    torch.save(payload, path)
 
 
 __all__ = ["EndpointError", "ensure_cuda_compat", "save_checkpoint"]
