@@ -4,18 +4,39 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from liteflownet3.models.liteflownet3 import LiteFlowNet3
 
 
-def load_image(path: str) -> torch.Tensor:
+def load_image(path: str) -> Tuple[torch.Tensor, Tuple[int, int]]:
     with Image.open(path) as img:
         image = torch.from_numpy(np.array(img.convert("RGB"))).permute(2, 0, 1).float() / 255.0
-    return image.unsqueeze(0)
+    tensor = image.unsqueeze(0)
+    _, h, w = tensor.shape
+    return tensor, (h, w)
+
+
+def pad_to_multiple(
+    image: torch.Tensor, multiple: int = 32
+) -> Tuple[torch.Tensor, Tuple[int, int, int, int]]:
+    """Pad a BCHW tensor so H and W become multiples of ``multiple``."""
+
+    _, _, h, w = image.shape
+    pad_h = (multiple - h % multiple) % multiple
+    pad_w = (multiple - w % multiple) % multiple
+
+    if pad_h == 0 and pad_w == 0:
+        return image, (0, 0, 0, 0)
+
+    padding = (0, pad_w, 0, pad_h)  # (left, right, top, bottom)
+    padded = F.pad(image, padding, mode="replicate")
+    return padded, padding
 
 
 def save_flow(flow: torch.Tensor, path: str) -> None:
@@ -46,11 +67,29 @@ def main() -> None:
     model.to(device)
     model.eval()
 
-    image1 = load_image(args.image1).to(device)
-    image2 = load_image(args.image2).to(device)
+    image1, size1 = load_image(args.image1)
+    image2, size2 = load_image(args.image2)
+
+    if size1 != size2:
+        raise ValueError(
+            f"Input images must share the same resolution, but got {size1} and {size2}."
+        )
+
+    image1 = image1.to(device)
+    image2 = image2.to(device)
+
+    image1, padding = pad_to_multiple(image1)
+    image2, _ = pad_to_multiple(image2)
 
     with torch.no_grad():
         flow = model(image1, image2)
+
+    if padding != (0, 0, 0, 0):
+        left, right, top, bottom = padding
+        _, _, padded_h, padded_w = flow.shape
+        flow = flow[..., top : padded_h - bottom, left : padded_w - right]
+        orig_h, orig_w = size1
+        flow = flow[..., :orig_h, :orig_w]
 
     save_flow(flow, args.output)
     print(f"Saved flow to {args.output}")
